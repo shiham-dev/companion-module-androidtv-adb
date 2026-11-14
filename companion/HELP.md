@@ -21,12 +21,16 @@ Controls one Android / Google TV of any brand over the network with ADB (TCP por
 | Field                          | Meaning                                                                                                                                                                                                                                                                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | TV IP / port                   | Address of the TV, port 5555                                                                                                                                                                                                                                                                   |
-| MAC address                    | Optional. Enables Wake-on-LAN when the TV is unreachable                                                                                                                                                                                                                                       |
-| WoL broadcast / port / packets | Where to send magic packets (default 255.255.255.255:9, 5 packets)                                                                                                                                                                                                                             |
-| Wake wait                      | How long to keep retrying ADB after WoL before giving up (default 15 s)                                                                                                                                                                                                                        |
+| MAC address                    | Learned automatically from the TV on first connect (wired MAC); you can also type it. Needed to wake a TV that is off the network                                                                                                                                                              |
+| WoL broadcast / port / packets | Broadcast learned from the TV's subnet (else x.y.z.255 of its IP); packets also go unicast to the TV IP. Port 9, 5 packets per burst, repeated every 5 s                                                                                                                                       |
+| Wake wait                      | How long Power On keeps waking and retrying ADB (default 60 s; a TV booting after a power cut needs 30-90 s)                                                                                                                                                                                   |
 | Poll interval                  | How often to read the power state (`dumpsys power`), default 5 s                                                                                                                                                                                                                               |
 | HDMI switching method          | **Auto** (default: reads `dumpsys tv_input` once, maps HDMI ports to the TV's input IDs and opens them with the passthrough intent; falls back to key events), **Key event** (KEYCODE_TV_INPUT_HDMI_1..4), **Passthrough intent** (enter the TV input ID per HDMI) or **Custom shell command** |
 | ADB key                        | Generated automatically and stored in the connection config so the approval survives restarts. Advanced: paste an existing `adbkey` (PEM) to reuse a key the TV already trusts                                                                                                                 |
+
+### After a power cut
+
+After mains power returns, many TVs sit in a cold standby with Android not running and are invisible on the network. Only Wake-on-LAN can wake them. That needs the MAC (learned automatically once the TV has been reached), the TV's _Network standby / Wake on LAN_ setting switched on, and a network that passes the magic packet. Some models ignore WoL from cold standby; the remote is then the only way.
 
 ### Actions
 
@@ -47,7 +51,7 @@ Controls one Android / Google TV of any brand over the network with ADB (TCP por
 
 ### Variables
 
-`power_state`, `connection_status`, `model`, `manufacturer`, `android_version`, `last_error`, `last_input`, `tv_inputs`, `last_shell_output`, `adb_key_fingerprint`
+`power_state`, `connection_status`, `mac_address`, `wol_targets`, `model`, `manufacturer`, `android_version`, `last_error`, `last_input`, `tv_inputs`, `last_shell_output`, `adb_key_fingerprint`
 
 ### HDMI switching notes
 

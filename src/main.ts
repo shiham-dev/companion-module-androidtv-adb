@@ -8,7 +8,8 @@ import { getPresets } from './presets.js'
 import { TvController, type TvSnapshot } from './tv.js'
 import { UpgradeScripts } from './upgrades.js'
 import { VARIABLES } from './variables.js'
-import { parseMac } from './wol.js'
+import { parseMac, wolTargets } from './wol.js'
+import type { NetworkInfo } from './android.js'
 
 /** MD5 fingerprint of the public key blob, the same value Android shows in the "Allow USB debugging?" dialog. */
 export function keyFingerprint(key: KeyObject, name: string): string {
@@ -104,7 +105,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			key: this.#key,
 			keyName: cfg.key_name,
 			mac,
-			wolAddress: cfg.wol_address || '255.255.255.255',
+			wolAddresses: wolTargets(cfg.host, cfg.wol_address),
 			wolPort: cfg.wol_port,
 			wolCount: cfg.wol_count,
 			wakeWindowMs: cfg.wake_window * 1000,
@@ -114,10 +115,41 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		})
 		tv.on('update', (s) => this.#publish(s))
 		tv.on('log', (level, msg) => this.log(level, msg))
+		tv.on('network', (info) => this.#onNetwork(info))
+		this.setVariableValues({ mac_address: mac ?? '', wol_targets: wolTargets(cfg.host, cfg.wol_address).join(', ') })
 		this.tv = tv
 		this.#publish(tv.snapshot)
 		this.updateStatus(InstanceStatus.Connecting, `Connecting to ${cfg.host}:${cfg.port}`)
 		tv.start()
+	}
+
+	/** Learn the TV's MAC and subnet broadcast so Wake-on-LAN works without manual setup. */
+	#onNetwork(info: NetworkInfo): void {
+		const cfg = this.config
+		const patch: Partial<ModuleConfig> = {}
+		if (!cfg.mac && info.mac) patch.mac = info.mac
+		if (!cfg.wol_address && info.broadcast) patch.wol_address = info.broadcast
+		if (/^wlan/.test(info.iface)) {
+			this.log(
+				'warn',
+				`TV is on Wi-Fi (${info.iface}): Wake-on-LAN over Wi-Fi is unreliable; a wired connection is recommended`,
+			)
+		}
+		if (Object.keys(patch).length) {
+			this.config = { ...cfg, ...patch }
+			this.saveConfig(this.config)
+			this.log(
+				'info',
+				`Learned from the TV (${info.iface} ${info.ip}/${info.prefix}): ` +
+					[patch.mac && `MAC ${patch.mac}`, patch.wol_address && `WoL broadcast ${patch.wol_address}`]
+						.filter(Boolean)
+						.join(', ') +
+					' (saved to the connection config)',
+			)
+		}
+		const targets = wolTargets(this.config.host, this.config.wol_address)
+		this.tv?.setWakeTarget(this.config.mac || undefined, targets)
+		this.setVariableValues({ mac_address: this.config.mac, wol_targets: targets.join(', ') })
 	}
 
 	#publish(s: TvSnapshot | null): void {
@@ -155,7 +187,12 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 				this.updateStatus(InstanceStatus.UnknownWarning, 'Awaiting approval on TV: tick "Always allow" and press Allow')
 				break
 			case 'offline':
-				this.updateStatus(InstanceStatus.ConnectionFailure, `TV offline / unreachable (${where})`)
+				this.updateStatus(
+					InstanceStatus.ConnectionFailure,
+					this.config.mac
+						? `TV offline / unreachable (${where}); Power On will use Wake-on-LAN`
+						: `TV offline / unreachable (${where}); no MAC known, so Power On cannot wake it (switch it on once with the remote)`,
+				)
 				break
 			case 'auth_failed':
 				this.updateStatus(InstanceStatus.AuthenticationFailure, s.lastError || 'ADB key not approved on the TV')

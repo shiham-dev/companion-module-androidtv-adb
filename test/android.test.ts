@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import {
 	hdmiCommand,
 	normalizeKeycode,
+	directedBroadcast,
 	parseHdmiInputMap,
+	parseNetworkInfo,
 	parseBanner,
 	parsePowerState,
 	parseTvInputIds,
@@ -76,4 +78,36 @@ test('parseTvInputIds and parseBanner', () => {
 		'ro.product.model': 'TV 4K',
 		features: 'shell_v2',
 	})
+})
+
+test('parseNetworkInfo: real TCL output (wired)', () => {
+	const out =
+		'    inet 127.0.0.1/8 scope host lo\n    inet 172.20.173.105/24 brd 172.20.173.255 scope global eth0\n@@\n38:26:56:42:8b:ab\n@@\niface: eth0, up: true, hwAddress: 38:26:56:42:8b:ab\n@@\neth0 \nwlan0 \n'
+	assert.deepEqual(parseNetworkInfo(out, '172.20.173.105'), {
+		iface: 'eth0',
+		ip: '172.20.173.105',
+		prefix: 24,
+		broadcast: '172.20.173.255',
+		mac: '38:26:56:42:8b:ab',
+	})
+})
+
+test('parseNetworkInfo: Wi-Fi uses the wlan MAC, never ro.boot.mac; missing brd is computed', () => {
+	const out = '    inet 10.1.2.3/23 scope global wlan0\n@@\n38:26:56:42:8b:ab\n@@\n@@\neth0 \nwlan0 AA:BB:CC:00:11:22\n'
+	assert.deepEqual(parseNetworkInfo(out, '10.1.2.3'), {
+		iface: 'wlan0',
+		ip: '10.1.2.3',
+		prefix: 23,
+		broadcast: '10.1.3.255',
+		mac: 'aa:bb:cc:00:11:22',
+	})
+	assert.equal(parseNetworkInfo('@@@@@@', 'x'), null)
+})
+
+test('directedBroadcast', () => {
+	assert.equal(directedBroadcast('172.20.171.3', 24), '172.20.171.255')
+	assert.equal(directedBroadcast('10.0.5.9', 16), '10.0.255.255')
+	assert.equal(directedBroadcast('192.168.1.130', 25), '192.168.1.255')
+	assert.equal(directedBroadcast('192.168.1.10', 25), '192.168.1.127')
+	assert.equal(directedBroadcast('bad', 24), '')
 })

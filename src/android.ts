@@ -122,6 +122,82 @@ export function parseHdmiInputMap(dumpsys: string): Record<number, string> {
 	return out
 }
 
+/**
+ * One shell round-trip that collects what Wake-on-LAN needs: the interfaces with their IPv4 address,
+ * prefix and broadcast, plus MAC addresses from the sources that are readable without root on TVs
+ * (/sys/class/net is often permission-denied, `ip link` too).
+ */
+export const NETWORK_QUERY =
+	'ip -4 addr 2>/dev/null | grep inet; echo @@; getprop ro.boot.mac; echo @@; ' +
+	"dumpsys ethernet 2>/dev/null | grep -o 'iface: [a-z0-9]*, up: [a-z]*, hwAddress: [0-9a-fA-F:]*'; echo @@; " +
+	'for i in eth0 wlan0; do echo "$i $(cat /sys/class/net/$i/address 2>/dev/null)"; done'
+
+export interface NetworkInfo {
+	iface: string
+	ip: string
+	prefix: number
+	/** Directed broadcast of the TV's subnet, e.g. 172.20.171.255 */
+	broadcast: string
+	/** MAC of `iface`, lower-case aa:bb:cc:dd:ee:ff, or '' if it couldn't be read */
+	mac: string
+}
+
+const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/
+
+function normMac(m: string | undefined): string {
+	const s = (m ?? '').trim().toLowerCase()
+	return MAC_RE.test(s) && s !== '00:00:00:00:00:00' ? s : ''
+}
+
+/** Directed broadcast for an IPv4 address and prefix length. */
+export function directedBroadcast(ip: string, prefix: number): string {
+	const parts = ip.split('.').map(Number)
+	if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return ''
+	if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return ''
+	const addr = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0
+	const hostMask = prefix === 32 ? 0 : (0xffffffff >>> prefix) >>> 0
+	const b = (addr | hostMask) >>> 0
+	return [b >>> 24, (b >>> 16) & 255, (b >>> 8) & 255, b & 255].join('.')
+}
+
+/**
+ * Parse NETWORK_QUERY output. `preferIp` selects the interface that carries the address we connect to.
+ * Returns null if no usable IPv4 interface was found.
+ */
+export function parseNetworkInfo(out: string, preferIp?: string): NetworkInfo | null {
+	const [addrs = '', bootMac = '', eth = '', sys = ''] = out.split('@@')
+	const ifaces: { iface: string; ip: string; prefix: number; brd: string }[] = []
+	for (const line of addrs.split(/\r?\n/)) {
+		const m = /inet (\d+\.\d+\.\d+\.\d+)\/(\d+)(?: brd (\d+\.\d+\.\d+\.\d+))?.*?\s(\S+)\s*$/.exec(line.trim())
+		if (!m || m[1].startsWith('127.')) continue
+		ifaces.push({ ip: m[1], prefix: Number(m[2]), brd: m[3] ?? '', iface: m[4] })
+	}
+	const chosen = ifaces.find((i) => i.ip === preferIp) ?? ifaces.find((i) => /^eth/.test(i.iface)) ?? ifaces[0]
+	if (!chosen) return null
+
+	const macs = new Map<string, string>()
+	for (const m of eth.matchAll(/iface: (\w+), up: \w+, hwAddress: ([0-9a-fA-F:]+)/g)) {
+		const v = normMac(m[2])
+		if (v) macs.set(m[1], v)
+	}
+	for (const line of sys.split(/\r?\n/)) {
+		const [iface, mac] = line.trim().split(/\s+/)
+		const v = normMac(mac)
+		if (iface && v && !macs.has(iface)) macs.set(iface, v)
+	}
+	let mac = macs.get(chosen.iface) ?? ''
+	// ro.boot.mac is the built-in Ethernet MAC on the TVs we know; only trust it for a wired interface.
+	if (!mac && /^eth/.test(chosen.iface)) mac = normMac(bootMac)
+
+	return {
+		iface: chosen.iface,
+		ip: chosen.ip,
+		prefix: chosen.prefix,
+		broadcast: chosen.brd || directedBroadcast(chosen.ip, chosen.prefix),
+		mac,
+	}
+}
+
 /** Pull "ro.product.model=..." etc. out of the CNXN banner. */
 export function parseBanner(banner: string): Record<string, string> {
 	const out: Record<string, string> = {}

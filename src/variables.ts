@@ -10,5 +10,7 @@ export const VARIABLES: CompanionVariableDefinition[] = [
 	{ variableId: 'last_input', name: 'Last input selected by this module' },
 	{ variableId: 'tv_inputs', name: 'TV input IDs (from "List TV inputs")' },
 	{ variableId: 'last_shell_output', name: 'Output of the last shell command' },
+	{ variableId: 'mac_address', name: 'TV MAC address used for Wake-on-LAN (configured or learned)' },
+	{ variableId: 'wol_targets', name: 'Wake-on-LAN target addresses' },
 	{ variableId: 'adb_key_fingerprint', name: 'ADB key fingerprint (as shown on the TV)' },
 ]

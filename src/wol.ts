@@ -1,5 +1,6 @@
 /** Wake-on-LAN magic packets (UDP), suitable for directed broadcasts across routed subnets. */
 import { createSocket } from 'node:dgram'
+import { directedBroadcast } from './android.js'
 
 /** Parse a MAC address in common notations (aa:bb:cc:dd:ee:ff, aa-bb-..., aabb.ccdd.eeff, aabbccddeeff). */
 export function parseMac(mac: string): Buffer {
@@ -51,4 +52,20 @@ export async function sendWol(opts: WolOptions): Promise<void> {
 	} finally {
 		sock.close()
 	}
+}
+
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/
+
+/**
+ * Wake-on-LAN targets: the configured broadcast, else the TV subnet's directed broadcast (as learned
+ * from the TV, or assuming /24 from its IP), plus the TV's own address as a unicast fallback
+ * (works while the router still has an ARP entry for it).
+ */
+export function wolTargets(host: string, configured: string): string[] {
+	const out: string[] = []
+	if (configured) out.push(configured)
+	else if (IPV4.test(host)) out.push(directedBroadcast(host, 24))
+	else out.push('255.255.255.255')
+	if (IPV4.test(host)) out.push(host)
+	return [...new Set(out.filter(Boolean))]
 }

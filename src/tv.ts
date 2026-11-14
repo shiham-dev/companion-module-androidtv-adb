@@ -7,12 +7,15 @@ import type { KeyObject } from 'node:crypto'
 import { AdbClient, AdbError, type AdbConnectionState } from './adb/client.js'
 import {
 	KEYCODE,
+	NETWORK_QUERY,
 	POWER_QUERY,
 	hdmiCommand,
 	keyeventCommand,
 	parseHdmiInputMap,
 	parseBanner,
+	parseNetworkInfo,
 	parsePowerState,
+	type NetworkInfo,
 	type HdmiMethod,
 	type PowerState,
 } from './android.js'
@@ -24,10 +27,11 @@ export interface TvOptions {
 	key: KeyObject
 	keyName: string
 	mac?: string
-	wolAddress?: string
+	/** Where to send magic packets: directed broadcast(s) and/or the TV's unicast address. */
+	wolAddresses?: string[]
 	wolPort?: number
 	wolCount?: number
-	/** After WoL, keep retrying ADB for this long before giving up. */
+	/** After WoL, keep retrying ADB for this long before giving up (cold boots can take 30-90 s). */
 	wakeWindowMs?: number
 	/** Power-state poll interval (0 disables polling). */
 	pollIntervalMs: number
@@ -55,7 +59,12 @@ export interface TvSnapshot {
 export interface TvEvents {
 	update: [TvSnapshot]
 	log: ['info' | 'warn' | 'error' | 'debug', string]
+	/** Network details read from the TV (MAC, subnet broadcast) after a successful connection. */
+	network: [NetworkInfo]
 }
+
+const UNREACHABLE = new Set(['CONNECT_FAILED', 'TIMEOUT', 'CLOSED'])
+const isUnreachable = (e: unknown) => e instanceof AdbError && UNREACHABLE.has(e.code)
 
 const sleep = async (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -74,6 +83,7 @@ export class TvController extends EventEmitter<TvEvents> {
 	#pollTimer: NodeJS.Timeout | undefined
 	#polling = false
 	#stopped = true
+	#destroyed = false
 	#infoFetched = false
 	#authFailedAt = 0
 
@@ -137,6 +147,7 @@ export class TvController extends EventEmitter<TvEvents> {
 
 	stop(): void {
 		this.#stopped = true
+		this.#destroyed = true
 		if (this.#pollTimer) clearTimeout(this.#pollTimer)
 		this.#pollTimer = undefined
 		this.client.close()
@@ -200,6 +211,21 @@ export class TvController extends EventEmitter<TvEvents> {
 			this.emit('log', 'debug', `getprop failed: ${(e as Error).message}`)
 		}
 		this.#update({ model, manufacturer, androidVersion })
+		try {
+			const info = parseNetworkInfo(
+				await this.client.shell(NETWORK_QUERY, this.opts.commandTimeoutMs ?? 8000),
+				this.opts.host,
+			)
+			if (info) this.emit('network', info)
+		} catch (e) {
+			this.emit('log', 'debug', `network info failed: ${(e as Error).message}`)
+		}
+	}
+
+	/** Update the Wake-on-LAN target (e.g. after the MAC was learned from the TV). */
+	setWakeTarget(mac: string | undefined, addresses: string[]): void {
+		this.opts.mac = mac
+		this.opts.wolAddresses = addresses
 	}
 
 	#handleError(e: unknown): void {
@@ -262,7 +288,7 @@ export class TvController extends EventEmitter<TvEvents> {
 	}
 
 	async powerToggle(): Promise<void> {
-		if ((this.#snap.power === 'offline' || this.#snap.connection === 'offline') && this.opts.mac) {
+		if (this.#snap.power === 'offline' || this.#snap.connection === 'offline') {
 			return this.powerOn()
 		}
 		const before = this.#snap.power
@@ -274,58 +300,112 @@ export class TvController extends EventEmitter<TvEvents> {
 	}
 
 	/**
-	 * Power on: if ADB answers, send KEYCODE_WAKEUP. Otherwise, if a MAC is configured, send
-	 * Wake-on-LAN packets and keep retrying ADB for the wake window, then send KEYCODE_WAKEUP.
+	 * Power on.
+	 * - TV answers ADB: send KEYCODE_WAKEUP and verify it reports Awake (retrying the key if not).
+	 * - TV unreachable and a MAC is known: Wake-on-LAN bursts every 5 s, retry ADB for the wake window
+	 *   (cold boots after a power cut can take 30-90 s), then wake + verify.
+	 * - TV unreachable and no MAC: fail with an explanation.
 	 */
 	async powerOn(): Promise<void> {
-		if (this.#snap.connection !== 'offline' || !this.opts.mac) {
+		if (this.#snap.connection !== 'offline') {
 			try {
-				await this.key(KEYCODE.WAKEUP)
-				this.#update({ power: 'on' })
-				this.refreshSoon(2000)
+				await this.#wakeAndVerify()
 				return
 			} catch (e) {
-				if (!(e instanceof AdbError) || !['CONNECT_FAILED', 'TIMEOUT', 'CLOSED'].includes(e.code) || !this.opts.mac)
-					throw e
+				if (!isUnreachable(e)) throw e
+			}
+		}
+		if (!this.opts.mac) {
+			// One quick direct attempt in case the TV came back since the last poll.
+			try {
+				await this.#wakeAndVerify()
+				return
+			} catch (e) {
+				if (!isUnreachable(e)) throw e
+				throw new Error(
+					`TV is unreachable (${(e as Error).message}) and no MAC address is known, so Wake-on-LAN cannot be used. ` +
+						'Switch the TV on once with its remote: the module then learns its MAC automatically.',
+					{ cause: e },
+				)
 			}
 		}
 		await this.#wakeViaWol()
 	}
 
+	/** Send KEYCODE_WAKEUP until dumpsys power reports the TV awake (3 attempts). */
+	async #wakeAndVerify(): Promise<void> {
+		let state: PowerState = 'unknown'
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				await this.key(KEYCODE.WAKEUP)
+			} catch (e) {
+				// A slow "input keyevent" while the TV is waking is fine; anything else is a real failure.
+				if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+			}
+			const until = Date.now() + 6000
+			while (Date.now() < until) {
+				await sleep(1500)
+				try {
+					state = parsePowerState(await this.client.shell(POWER_QUERY, 8000))
+				} catch (e) {
+					if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+					continue
+				}
+				if (state === 'on') {
+					this.#update({ power: 'on', connection: 'connected', lastError: '' })
+					if (attempt > 1) this.emit('log', 'info', `TV awake after ${attempt} wake attempts`)
+					this.refreshSoon(2000)
+					return
+				}
+			}
+			this.emit('log', 'warn', `TV still reports "${state}" after KEYCODE_WAKEUP (attempt ${attempt}/3)`)
+		}
+		this.refreshSoon(1000)
+		throw new Error(`TV accepted KEYCODE_WAKEUP but still reports power state "${state}"`)
+	}
+
 	async #wakeViaWol(): Promise<void> {
 		const mac = this.opts.mac as string
-		const address = this.opts.wolAddress || '255.255.255.255'
+		const addresses = this.opts.wolAddresses?.length ? this.opts.wolAddresses : ['255.255.255.255']
 		const port = this.opts.wolPort || 9
-		const windowMs = this.opts.wakeWindowMs ?? 15000
+		const windowMs = this.opts.wakeWindowMs ?? 60000
+		const started = Date.now()
 		this.#update({ waking: true })
 		try {
-			this.emit('log', 'info', `TV offline: sending Wake-on-LAN to ${mac} via ${address}:${port}`)
-			const deadline = Date.now() + windowMs
+			this.emit(
+				'log',
+				'info',
+				`TV unreachable: sending Wake-on-LAN to ${mac} via ${addresses.join(', ')} (port ${port}), waiting up to ${Math.round(windowMs / 1000)} s`,
+			)
+			const deadline = started + windowMs
 			let lastErr: unknown
 			let nextWol = 0
-			while (Date.now() < deadline && !this.#stopped) {
+			while (Date.now() < deadline && !this.#destroyed) {
 				if (Date.now() >= nextWol) {
-					await sendWol({ mac, address, port, count: this.opts.wolCount ?? 5, intervalMs: 100 }).catch((e) =>
-						this.emit('log', 'warn', `Wake-on-LAN send failed: ${(e as Error).message}`),
-					)
+					for (const address of addresses) {
+						await sendWol({ mac, address, port, count: this.opts.wolCount ?? 5, intervalMs: 100 }).catch((e) =>
+							this.emit('log', 'warn', `Wake-on-LAN to ${address} failed: ${(e as Error).message}`),
+						)
+					}
 					nextWol = Date.now() + 5000 // repeat the burst every 5 s while waiting
 				}
 				try {
 					await this.client.connect()
-					await this.key(KEYCODE.WAKEUP)
-					this.#update({ power: 'on', connection: 'connected', lastError: '' })
-					this.emit('log', 'info', 'TV woke up and accepted KEYCODE_WAKEUP')
-					return
 				} catch (e) {
 					lastErr = e
 					if (e instanceof AdbError && (e.code === 'AUTH_REJECTED' || e.code === 'AUTH_TIMEOUT')) throw e
 					await sleep(1000)
+					continue
 				}
+				this.emit('log', 'info', `TV answered ADB ${Math.round((Date.now() - started) / 1000)} s after Wake-on-LAN`)
+				await this.#wakeAndVerify()
+				return
 			}
 			this.#update({ connection: 'offline', power: 'offline' })
 			throw new Error(
-				`TV did not come online within ${Math.round(windowMs / 1000)} s after Wake-on-LAN` +
-					(lastErr ? ` (${(lastErr as Error).message})` : ''),
+				`TV did not come online within ${Math.round(windowMs / 1000)} s after Wake-on-LAN to ${mac}` +
+					(lastErr ? ` (${(lastErr as Error).message})` : '') +
+					'. If the TV lost mains power it may ignore Wake-on-LAN until it has been switched on once: check its network standby / Wake-on-LAN settings.',
 			)
 		} finally {
 			this.#update({ waking: false })

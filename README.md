@@ -32,7 +32,7 @@ HDMI selection is vendor-specific, so there are four methods. Set one per connec
 1. Download `androidtv-adb-<version>.tgz` from the [Releases](https://github.com/shiham-dev/companion-module-androidtv-adb/releases) page (or build it, see below).
 2. In the Companion web UI (default `http://127.0.0.1:8000`), go to **Modules → Import module package** and pick the `.tgz`.
 3. Go to **Connections**, search for **"Android TV / Google TV (ADB)"** (listed under "Generic") and click **Add**.
-4. Enter the TV IP. Optionally add the MAC address and the WoL broadcast address (the TV subnet's directed broadcast, e.g. `192.168.20.255`). Click **Save**.
+4. Enter the TV IP and click **Save**. The MAC address and the WoL broadcast address fill in **automatically** the first time the module reaches the TV. The MAC comes from the TV's wired interface and the broadcast from its subnet. You can also type them in.
 5. On the TV, accept **"Allow USB debugging?"**: tick _Always allow from this computer_, then press _Allow_. Until you do, the connection shows _Awaiting approval on TV_. The fingerprint shown on the TV matches the one in the connection settings and in `$(<label>:adb_key_fingerprint)`.
 6. Drag the presets from **Buttons → Presets → \<connection\>** onto your Stream Deck pages.
 
@@ -56,20 +56,20 @@ To update, import the newer `.tgz`, then pick the new version on the connection 
 
 ## Configuration
 
-| Field                       | Default                 | Notes                                                                                                   |
-| --------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
-| TV IP address / hostname    |                         | required                                                                                                |
-| ADB port                    | 5555                    |                                                                                                         |
-| MAC address                 |                         | Enables Wake-on-LAN when the TV is unreachable                                                          |
-| WoL broadcast address       | 255.255.255.255         | Use the TV subnet's directed broadcast across subnets                                                   |
-| WoL port                    | 9                       |                                                                                                         |
-| WoL packets per burst       | 5                       | The burst repeats every 5 s during the wake window                                                      |
-| Wake wait (s)               | 15                      | How long Power On keeps retrying ADB after WoL                                                          |
-| Status poll interval (s)    | 5                       | `dumpsys power` (filtered on the TV). 0 disables polling                                                |
-| Keep ADB connection open    | on                      | See the one-client note above                                                                           |
-| HDMI switching method       | Auto                    | Auto / Key event / Passthrough / Custom, plus per-port ID or command                                    |
-| ADB key name                | companion-androidtv-adb | Label shown on the TV's approval dialog                                                                 |
-| Show / edit ADB private key | off                     | Advanced: view or paste a PEM key (e.g. reuse an `adbkey` the TV already trusts), or generate a new one |
+| Field                       | Default                 | Notes                                                                                                                                                 |
+| --------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TV IP address / hostname    |                         | required                                                                                                                                              |
+| ADB port                    | 5555                    |                                                                                                                                                       |
+| MAC address                 | learned                 | Read from the TV on first connect (wired MAC) and saved. Without it, Power On cannot wake a TV that is off the network                                |
+| WoL broadcast address       | learned                 | The TV subnet's directed broadcast, read from the TV on first connect. If empty, x.y.z.255 of the TV IP is used. Packets also go unicast to the TV IP |
+| WoL port                    | 9                       |                                                                                                                                                       |
+| WoL packets per burst       | 5                       | The burst repeats every 5 s during the wake window                                                                                                    |
+| Wake wait (s)               | 60                      | How long Power On keeps sending WoL and retrying ADB. A TV booting after a power cut needed about 50 s                                                |
+| Status poll interval (s)    | 5                       | `dumpsys power` (filtered on the TV). 0 disables polling                                                                                              |
+| Keep ADB connection open    | on                      | See the one-client note above                                                                                                                         |
+| HDMI switching method       | Auto                    | Auto / Key event / Passthrough / Custom, plus per-port ID or command                                                                                  |
+| ADB key name                | companion-androidtv-adb | Label shown on the TV's approval dialog                                                                                                               |
+| Show / edit ADB private key | off                     | Advanced: view or paste a PEM key (e.g. reuse an `adbkey` the TV already trusts), or generate a new one                                               |
 
 **Key storage.** The RSA-2048 key is generated on first run and saved in the connection's config (hidden field, written with `saveConfig`). That's what makes the approval stick. It also means a Companion config export contains the key, so treat exports as sensitive.
 
@@ -78,6 +78,16 @@ To update, import the newer `.tgz`, then pick the new version on the connection 
 - **ADB:** `CNXN` with version `0x01000001` and a 1 MiB max payload (the older version with a large payload makes adbd drop the connection). Then `AUTH TOKEN` → `SIGNATURE` (RSA PKCS#1 v1.5 over the SHA-1 DigestInfo prefix plus the token, not re-hashed). If the TV rejects that, `RSAPUBLICKEY` in Android's mincrypt format (`base64(struct) + " name\0"`), and the TV shows the approval prompt. Commands run as `shell:` streams over one connection, serialized, with reconnect on drop.
 - **Power state:** `dumpsys power`, using `mWakefulness=Awake|Dreaming` → on and `Asleep|Dozing` → off (with fallback to `Display Power: state=`). If the TV is unreachable, the state is **offline**.
 - **Power On:** if ADB answers, send `KEYCODE_WAKEUP`. Otherwise, if a MAC is set, send WoL bursts and retry ADB for the wake window, then send `KEYCODE_WAKEUP`. Actions return to Companion at once and run in the background, so Companion never blocks.
+
+## After a power cut (mains off/on)
+
+Many TVs, including the TCL tested here, come back from a mains cycle in a **cold standby** with Android not running. The TV is then completely off the network: no ping, no ADB. Plain ADB can't wake it, and **Wake-on-LAN is the only remote path**. That needs:
+
+1. The **MAC address** on the connection. The module learns it on first contact; if the TV has never been reached, switch it on once with the remote.
+2. The TV's **Wake-on-LAN / network standby** setting **on**, and the TV must honour it from cold standby. Not every model does: check the TV menu, usually _Settings → System/Device preferences → Power_ (or _Network_) → _Network standby_, _Wake on LAN_ or _Power on with network_. If the menu offers _Power on behaviour after power loss: Last state / On_, set it to suit the room.
+3. The **network** delivering the magic packet: a directed broadcast to the TV subnet (routers often block these) or unicast to the TV IP.
+
+Power On then sends WoL bursts every 5 s and retries ADB for the wake window (60 s by default; a cold boot to ADB took about 50 s on the test TV). After that it sends KEYCODE_WAKEUP and checks that the TV reports Awake. If the TV doesn't come back, the connection reports why.
 
 ## Development
 
