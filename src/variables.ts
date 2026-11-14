@@ -12,5 +12,7 @@ export const VARIABLES: CompanionVariableDefinition[] = [
 	{ variableId: 'last_shell_output', name: 'Output of the last shell command' },
 	{ variableId: 'mac_address', name: 'TV MAC address used for Wake-on-LAN (configured or learned)' },
 	{ variableId: 'wol_targets', name: 'Wake-on-LAN target addresses' },
+	{ variableId: 'last_known_power', name: 'Last power state seen while the TV was reachable (on / off)' },
+	{ variableId: 'last_restore', name: 'Last power-state restore after a reboot / power cut' },
 	{ variableId: 'adb_key_fingerprint', name: 'ADB key fingerprint (as shown on the TV)' },
 ]

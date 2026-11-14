@@ -2,7 +2,7 @@ import { createHash, type KeyObject } from 'node:crypto'
 import { InstanceBase, InstanceStatus, runEntrypoint, type SomeCompanionConfigField } from '@companion-module/base'
 import { getActions } from './actions.js'
 import { androidPublicKey, generateAdbKeyPem, loadPrivateKey, normalizePem } from './adb/keys.js'
-import { getConfigFields, withDefaults, type ModuleConfig } from './config.js'
+import { INTERNAL_KEYS, getConfigFields, withDefaults, type ModuleConfig } from './config.js'
 import { getFeedbacks } from './feedbacks.js'
 import { getPresets } from './presets.js'
 import { TvController, type TvSnapshot } from './tv.js'
@@ -16,6 +16,14 @@ export function keyFingerprint(key: KeyObject, name: string): string {
 	const b64 = androidPublicKey(key, name).toString('utf8').split(' ')[0]
 	const md5 = createHash('md5').update(Buffer.from(b64, 'base64')).digest('hex').toUpperCase()
 	return md5.match(/../g)?.join(':') ?? md5
+}
+
+function sameExceptInternal(a: ModuleConfig, b: ModuleConfig): boolean {
+	for (const k of Object.keys({ ...a, ...b }) as (keyof ModuleConfig)[]) {
+		if (INTERNAL_KEYS.includes(k)) continue
+		if (a[k] !== b[k]) return false
+	}
+	return true
 }
 
 export class ModuleInstance extends InstanceBase<ModuleConfig> {
@@ -37,6 +45,12 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	}
 
 	async configUpdated(config: ModuleConfig): Promise<void> {
+		// Values the module saved itself (power state, boot id) must not restart the connection:
+		// that would cancel a pending restore.
+		if (this.tv && sameExceptInternal(withDefaults(config), this.config)) {
+			this.config = withDefaults(config)
+			return
+		}
 		await this.#apply(config)
 	}
 
@@ -111,16 +125,34 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			wakeWindowMs: cfg.wake_window * 1000,
 			pollIntervalMs: Math.max(0, cfg.poll_interval) === 0 ? 0 : Math.max(1, cfg.poll_interval) * 1000,
 			keepConnected: cfg.keep_connected,
+			restoreEnabled: cfg.restore_after_outage,
+			restoreDelayMs: Math.max(0, cfg.restore_delay) * 1000,
+			knownBootId: cfg.last_boot_id,
+			lastKnownPower: cfg.last_power_state === 'on' || cfg.last_power_state === 'off' ? cfg.last_power_state : '',
 			debug: (m) => this.log('debug', m),
 		})
 		tv.on('update', (s) => this.#publish(s))
 		tv.on('log', (level, msg) => this.log(level, msg))
 		tv.on('network', (info) => this.#onNetwork(info))
+		tv.on('persist', (p) => this.#persist(p))
+		tv.on('restore', (msg) => this.setVariableValues({ last_restore: msg }))
+		this.setVariableValues({ last_known_power: cfg.last_power_state })
 		this.setVariableValues({ mac_address: mac ?? '', wol_targets: wolTargets(cfg.host, cfg.wol_address).join(', ') })
 		this.tv = tv
 		this.#publish(tv.snapshot)
 		this.updateStatus(InstanceStatus.Connecting, `Connecting to ${cfg.host}:${cfg.port}`)
 		tv.start()
+	}
+
+	/** Save the boot id / last power state so reboot detection survives Companion restarts. */
+	#persist(p: { bootId?: string; lastPower?: 'on' | 'off' }): void {
+		const patch: Partial<ModuleConfig> = {}
+		if (p.bootId && p.bootId !== this.config.last_boot_id) patch.last_boot_id = p.bootId
+		if (p.lastPower && p.lastPower !== this.config.last_power_state) patch.last_power_state = p.lastPower
+		if (!Object.keys(patch).length) return
+		this.config = { ...this.config, ...patch }
+		this.saveConfig(this.config)
+		if (patch.last_power_state) this.setVariableValues({ last_known_power: patch.last_power_state })
 	}
 
 	/** Learn the TV's MAC and subnet broadcast so Wake-on-LAN works without manual setup. */

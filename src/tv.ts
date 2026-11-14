@@ -20,6 +20,7 @@ import {
 	type PowerState,
 } from './android.js'
 import { sendWol } from './wol.js'
+import { BOOT_ID_QUERY, decideRestore, parseBootId, type RestoreAction } from './restore.js'
 
 export interface TvOptions {
 	host: string
@@ -41,6 +42,14 @@ export interface TvOptions {
 	commandTimeoutMs?: number
 	authTimeoutMs?: number
 	debug?: (msg: string) => void
+	/** Restore the last known power state when the TV rebooted (e.g. after a power cut). */
+	restoreEnabled?: boolean
+	/** Wait this long after detecting the reboot before restoring (lets the TV finish booting). */
+	restoreDelayMs?: number
+	/** Boot id persisted from the last time the TV was reachable. */
+	knownBootId?: string
+	/** Power state persisted from the last time the TV was reachable. */
+	lastKnownPower?: '' | 'on' | 'off'
 }
 
 export type ConnectionStatus =
@@ -61,12 +70,17 @@ export interface TvEvents {
 	log: ['info' | 'warn' | 'error' | 'debug', string]
 	/** Network details read from the TV (MAC, subnet broadcast) after a successful connection. */
 	network: [NetworkInfo]
+	/** Values to persist so reboot detection survives Companion restarts. */
+	persist: [{ bootId?: string; lastPower?: 'on' | 'off' }]
+	/** Human-readable outcome of the power-state restore (for a variable). */
+	restore: [string]
 }
 
 const UNREACHABLE = new Set(['CONNECT_FAILED', 'TIMEOUT', 'CLOSED'])
 const isUnreachable = (e: unknown) => e instanceof AdbError && UNREACHABLE.has(e.code)
 
 const sleep = async (ms: number) => new Promise((r) => setTimeout(r, ms))
+const stamp = () => new Date().toLocaleString('sv-SE')
 
 export class TvController extends EventEmitter<TvEvents> {
 	readonly opts: TvOptions
@@ -85,6 +99,10 @@ export class TvController extends EventEmitter<TvEvents> {
 	#stopped = true
 	#destroyed = false
 	#infoFetched = false
+	/** Boot id checked since the current ADB connection was made. */
+	#bootChecked = false
+	/** Pending power-state restore after a detected reboot. */
+	#restore: { timer: NodeJS.Timeout | undefined; action: RestoreAction } | null = null
 	#authFailedAt = 0
 
 	constructor(opts: TvOptions) {
@@ -136,6 +154,7 @@ export class TvController extends EventEmitter<TvEvents> {
 				if (this.#snap.connection === 'connected' || this.#snap.connection === 'connecting')
 					this.#update({ connection: 'disconnected' })
 				this.#infoFetched = false
+				this.#bootChecked = false
 				break
 		}
 	}
@@ -148,6 +167,8 @@ export class TvController extends EventEmitter<TvEvents> {
 	stop(): void {
 		this.#stopped = true
 		this.#destroyed = true
+		if (this.#restore?.timer) clearTimeout(this.#restore.timer)
+		this.#restore = null
 		if (this.#pollTimer) clearTimeout(this.#pollTimer)
 		this.#pollTimer = undefined
 		this.client.close()
@@ -180,9 +201,19 @@ export class TvController extends EventEmitter<TvEvents> {
 		if (this.#snap.connection === 'auth_failed' && Date.now() - this.#authFailedAt < 120000) return
 		this.#polling = true
 		try {
-			const out = await this.client.shell(POWER_QUERY, this.opts.commandTimeoutMs ?? 8000)
-			const power = parsePowerState(out)
+			const checkBoot = !this.#bootChecked
+			const out = await this.client.shell(
+				checkBoot ? BOOT_ID_QUERY + '; echo @@; ' + POWER_QUERY : POWER_QUERY,
+				this.opts.commandTimeoutMs ?? 8000,
+			)
+			const sep = checkBoot ? out.indexOf('@@') : -1
+			const power = parsePowerState(sep >= 0 ? out.slice(sep + 2) : out)
 			this.#update({ connection: 'connected', power, lastError: '' })
+			if (checkBoot) {
+				this.#bootChecked = true
+				this.#onBootChecked(parseBootId(sep >= 0 ? out.slice(0, sep) : ''), power)
+			}
+			this.#trackPower(power)
 			if (!this.#infoFetched) await this.#fetchInfo()
 		} catch (e) {
 			this.#handleError(e)
@@ -281,13 +312,131 @@ export class TvController extends EventEmitter<TvEvents> {
 		await this.shell(typeof code === 'number' ? keyeventCommand(code) : `input keyevent ${code}`, 20000)
 	}
 
+	/** Called once per ADB connection with the TV's boot id: detects reboots and schedules a restore. */
+	#onBootChecked(bootId: string, power: PowerState): void {
+		const d = decideRestore({
+			enabled: this.opts.restoreEnabled ?? false,
+			previousBootId: this.opts.knownBootId ?? '',
+			currentBootId: bootId,
+			lastKnown: this.opts.lastKnownPower ?? '',
+			current: power,
+		})
+		this.emit('log', 'debug', 'boot check: ' + d.reason)
+		if (bootId && bootId !== this.opts.knownBootId) {
+			this.opts.knownBootId = bootId
+			this.emit('persist', { bootId })
+		}
+		if (d.rebooted)
+			this.emit('log', 'info', 'TV rebooted since it was last reachable (power loss or restart): ' + d.reason)
+		if (d.action !== 'none') this.#scheduleRestore(d.action)
+	}
+
+	/** Remember the power state observed while reachable (Companion commands and remote control alike). */
+	#trackPower(power: PowerState): void {
+		if (this.#restore || this.#snap.waking) return
+		if ((power === 'on' || power === 'off') && power !== this.opts.lastKnownPower) {
+			this.opts.lastKnownPower = power
+			this.emit('persist', { lastPower: power })
+		}
+	}
+
+	#scheduleRestore(action: RestoreAction): void {
+		const target = action === 'power_off' ? 'off' : 'on'
+		const delay = Math.max(0, this.opts.restoreDelayMs ?? 15000)
+		const secs = Math.round(delay / 1000)
+		this.emit('log', 'info', 'TV rebooted after power loss; restoring previous state: ' + target + ' in ' + secs + ' s')
+		this.emit('restore', stamp() + ' rebooted; restoring ' + target + ' in ' + secs + ' s')
+		const entry: { timer: NodeJS.Timeout | undefined; action: RestoreAction } = { timer: undefined, action }
+		entry.timer = setTimeout(() => void this.#runRestore(entry), delay)
+		this.#restore = entry
+	}
+
+	async #runRestore(entry: { action: RestoreAction }): Promise<void> {
+		const target = entry.action === 'power_off' ? 'off' : 'on'
+		try {
+			if (entry.action === 'power_off') await this.#sleepAndVerify()
+			else await this.#wakeAndVerify()
+			if (this.#restore !== entry) return // cancelled while running
+			this.emit('log', 'info', 'Restored previous power state after reboot: ' + target)
+			this.emit('restore', stamp() + ' rebooted; restored ' + target)
+		} catch (e) {
+			if (this.#restore !== entry) return
+			this.emit('log', 'warn', 'Restoring power state (' + target + ') failed: ' + (e as Error).message)
+			this.emit('restore', stamp() + ' rebooted; restore to ' + target + ' failed: ' + (e as Error).message)
+		} finally {
+			if (this.#restore === entry) this.#restore = null
+		}
+	}
+
+	/** Cancel a pending restore because someone used a power action: never fight the user. */
+	#cancelRestore(reason: string): void {
+		const r = this.#restore
+		if (!r) return
+		if (r.timer) clearTimeout(r.timer)
+		this.#restore = null
+		this.emit('log', 'info', 'Power-state restore cancelled: ' + reason)
+		this.emit('restore', stamp() + ' restore cancelled: ' + reason)
+	}
+
+	/** True while a restore is scheduled or running. */
+	get restorePending(): boolean {
+		return this.#restore !== null
+	}
+
+	/** Send KEYCODE_SLEEP until dumpsys power reports the TV asleep (2 attempts). */
+	async #sleepAndVerify(): Promise<void> {
+		let state: PowerState = 'unknown'
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			try {
+				await this.key(KEYCODE.SLEEP)
+			} catch (e) {
+				if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+			}
+			const until = Date.now() + 8000
+			while (Date.now() < until) {
+				await sleep(1500)
+				try {
+					state = parsePowerState(await this.client.shell(POWER_QUERY, 8000))
+				} catch (e) {
+					if (isUnreachable(e)) {
+						state = 'offline' // some TVs drop off the network once asleep: that is "off"
+						break
+					}
+					if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+					continue
+				}
+				if (state === 'off') break
+			}
+			if (state === 'off' || state === 'offline') {
+				this.#update({ power: state })
+				this.refreshSoon(2000)
+				return
+			}
+		}
+		throw new Error('TV accepted KEYCODE_SLEEP but still reports power state "' + state + '"')
+	}
+
 	async powerOff(): Promise<void> {
-		await this.key(KEYCODE.SLEEP)
+		this.#cancelRestore('Power Off pressed')
+		try {
+			await this.key(KEYCODE.SLEEP)
+		} catch (e) {
+			if (!isUnreachable(e)) throw e
+			// Nothing to switch off: the TV is in deep standby or has no power.
+			this.emit(
+				'log',
+				'info',
+				`Power Off: TV is unreachable (${(e as Error).message}); it is already off or has no power`,
+			)
+			this.#update({ power: 'offline' })
+			return
+		}
 		this.#update({ power: 'off' })
 		this.refreshSoon(2000)
 	}
 
 	async powerToggle(): Promise<void> {
+		this.#cancelRestore('Power Toggle pressed')
 		if (this.#snap.power === 'offline' || this.#snap.connection === 'offline') {
 			return this.powerOn()
 		}
@@ -307,6 +456,11 @@ export class TvController extends EventEmitter<TvEvents> {
 	 * - TV unreachable and no MAC: fail with an explanation.
 	 */
 	async powerOn(): Promise<void> {
+		this.#cancelRestore('Power On pressed')
+		if (this.#wakeInFlight) {
+			this.emit('log', 'info', 'Power On: a Wake-on-LAN attempt is already in progress')
+			return this.#wakeInFlight.catch(() => undefined)
+		}
 		if (this.#snap.connection !== 'offline') {
 			try {
 				await this.#wakeAndVerify()
@@ -329,8 +483,14 @@ export class TvController extends EventEmitter<TvEvents> {
 				)
 			}
 		}
-		await this.#wakeViaWol()
+		this.#wakeInFlight = this.#wakeViaWol().finally(() => {
+			this.#wakeInFlight = null
+		})
+		return this.#wakeInFlight
 	}
+
+	/** The running Wake-on-LAN attempt, shared by Power On / Toggle presses made while it runs. */
+	#wakeInFlight: Promise<void> | null = null
 
 	/** Send KEYCODE_WAKEUP until dumpsys power reports the TV awake (3 attempts). */
 	async #wakeAndVerify(): Promise<void> {
@@ -368,7 +528,7 @@ export class TvController extends EventEmitter<TvEvents> {
 		const mac = this.opts.mac as string
 		const addresses = this.opts.wolAddresses?.length ? this.opts.wolAddresses : ['255.255.255.255']
 		const port = this.opts.wolPort || 9
-		const windowMs = this.opts.wakeWindowMs ?? 60000
+		const windowMs = this.opts.wakeWindowMs ?? 120000
 		const started = Date.now()
 		this.#update({ waking: true })
 		try {

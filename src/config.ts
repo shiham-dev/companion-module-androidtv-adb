@@ -21,7 +21,18 @@ export interface ModuleConfig {
 	regenerate_key: boolean
 	/** PEM private key, generated on first run and persisted with saveConfig. */
 	adb_private_key: string
+	/** Restore the last known power state when the TV rebooted (power cut). */
+	restore_after_outage: boolean
+	/** Seconds to wait after detecting the reboot before restoring. */
+	restore_delay: number
+	/** Internal: last power state seen while reachable ('on' | 'off' | ''). */
+	last_power_state: string
+	/** Internal: kernel boot id seen while reachable. */
+	last_boot_id: string
 }
+
+/** Config keys the module writes itself; changing them must not restart the connection. */
+export const INTERNAL_KEYS: (keyof ModuleConfig)[] = ['last_power_state', 'last_boot_id']
 
 export const DEFAULT_KEY_NAME = 'companion-androidtv-adb'
 
@@ -34,7 +45,7 @@ export function withDefaults(c: Partial<ModuleConfig> | undefined): ModuleConfig
 		wol_address: (c?.wol_address ?? '').trim(),
 		wol_port: n(c?.wol_port, 9),
 		wol_count: n(c?.wol_count, 5),
-		wake_window: n(c?.wake_window, 60),
+		wake_window: n(c?.wake_window, 120),
 		poll_interval: n(c?.poll_interval, 5),
 		keep_connected: c?.keep_connected ?? true,
 		hdmi_method: c?.hdmi_method ?? 'auto',
@@ -46,6 +57,10 @@ export function withDefaults(c: Partial<ModuleConfig> | undefined): ModuleConfig
 		show_key: c?.show_key ?? false,
 		regenerate_key: c?.regenerate_key ?? false,
 		adb_private_key: c?.adb_private_key ?? '',
+		restore_after_outage: c?.restore_after_outage ?? true,
+		restore_delay: n(c?.restore_delay, 15),
+		last_power_state: c?.last_power_state ?? '',
+		last_boot_id: c?.last_boot_id ?? '',
 	}
 }
 
@@ -117,11 +132,12 @@ export function getConfigFields(publicKeyInfo: string): SomeCompanionConfigField
 			type: 'number',
 			id: 'wake_window',
 			label: 'Wake wait (s): retry ADB after WoL for',
-			tooltip: 'A TV that lost mains power can take 30-90 s to boot before ADB answers.',
+			tooltip:
+				'A TV that lost mains power can take 30-90 s to boot before ADB answers, after it reacts to the magic packet.',
 			width: 4,
 			min: 5,
 			max: 300,
-			default: 60,
+			default: 120,
 		},
 		{
 			type: 'number',
@@ -171,6 +187,41 @@ export function getConfigFields(publicKeyInfo: string): SomeCompanionConfigField
 			default: '',
 			isVisibleExpression: `$(options:hdmi_method) != 'keycode'`,
 		})),
+		{
+			type: 'checkbox',
+			id: 'restore_after_outage',
+			label: 'Restore power state after outage',
+			tooltip:
+				'When the TV reboots (e.g. after a power cut) and comes up in a different state than it was in before, put it back: switch it off again if it was off, or wake it if it was on. Only a real reboot (new kernel boot id) triggers this; network drops and Companion restarts never do. Pressing any power action during the delay cancels it.',
+			width: 4,
+			default: true,
+		},
+		{
+			type: 'number',
+			id: 'restore_delay',
+			label: 'Delay after boot before restoring (s)',
+			width: 4,
+			min: 0,
+			max: 600,
+			default: 15,
+			isVisibleExpression: '$(options:restore_after_outage)',
+		},
+		{
+			type: 'textinput',
+			id: 'last_power_state',
+			label: 'internal: last power state',
+			width: 6,
+			default: '',
+			isVisibleExpression: 'false',
+		},
+		{
+			type: 'textinput',
+			id: 'last_boot_id',
+			label: 'internal: last boot id',
+			width: 6,
+			default: '',
+			isVisibleExpression: 'false',
+		},
 		{
 			type: 'textinput',
 			id: 'key_name',

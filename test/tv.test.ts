@@ -136,3 +136,41 @@ test('WoL window expires with a clear error and the TV shown offline', async () 
 		rx.close()
 	}
 })
+
+test('presses during a wake join the running attempt instead of starting another loop', async () => {
+	const rx = createSocket('udp4')
+	await new Promise<void>((r) => rx.bind(0, '127.0.0.1', () => r()))
+	const tv = controller(await freePort(), {
+		mac: '02:00:00:00:00:01',
+		wolAddresses: ['127.0.0.1'],
+		wolPort: rx.address().port,
+		wakeWindowMs: 1500,
+	})
+	const logs: string[] = []
+	tv.on('log', (_l, m) => logs.push(m))
+	try {
+		await tv.poll()
+		const first = tv.powerOn()
+		await new Promise((r) => setTimeout(r, 100))
+		const second = tv.powerOn()
+		const toggle = tv.powerToggle()
+		await assert.rejects(first, /did not come online/)
+		await second // joined: resolves, the failure is reported once by the first press
+		await toggle
+		assert.equal(logs.filter((m) => m.startsWith('TV unreachable: sending Wake-on-LAN')).length, 1)
+		assert.equal(logs.filter((m) => m.includes('already in progress')).length, 2)
+	} finally {
+		tv.stop()
+		rx.close()
+	}
+})
+
+test('Power Off on an unreachable TV is a no-op, not an error', async () => {
+	const tv = controller(await freePort())
+	try {
+		await tv.powerOff()
+		assert.equal(tv.snapshot.power, 'offline')
+	} finally {
+		tv.stop()
+	}
+})

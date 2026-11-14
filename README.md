@@ -56,20 +56,22 @@ To update, import the newer `.tgz`, then pick the new version on the connection 
 
 ## Configuration
 
-| Field                       | Default                 | Notes                                                                                                                                                 |
-| --------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| TV IP address / hostname    |                         | required                                                                                                                                              |
-| ADB port                    | 5555                    |                                                                                                                                                       |
-| MAC address                 | learned                 | Read from the TV on first connect (wired MAC) and saved. Without it, Power On cannot wake a TV that is off the network                                |
-| WoL broadcast address       | learned                 | The TV subnet's directed broadcast, read from the TV on first connect. If empty, x.y.z.255 of the TV IP is used. Packets also go unicast to the TV IP |
-| WoL port                    | 9                       |                                                                                                                                                       |
-| WoL packets per burst       | 5                       | The burst repeats every 5 s during the wake window                                                                                                    |
-| Wake wait (s)               | 60                      | How long Power On keeps sending WoL and retrying ADB. A TV booting after a power cut needed about 50 s                                                |
-| Status poll interval (s)    | 5                       | `dumpsys power` (filtered on the TV). 0 disables polling                                                                                              |
-| Keep ADB connection open    | on                      | See the one-client note above                                                                                                                         |
-| HDMI switching method       | Auto                    | Auto / Key event / Passthrough / Custom, plus per-port ID or command                                                                                  |
-| ADB key name                | companion-androidtv-adb | Label shown on the TV's approval dialog                                                                                                               |
-| Show / edit ADB private key | off                     | Advanced: view or paste a PEM key (e.g. reuse an `adbkey` the TV already trusts), or generate a new one                                               |
+| Field                                 | Default                 | Notes                                                                                                                                                 |
+| ------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TV IP address / hostname              |                         | required                                                                                                                                              |
+| ADB port                              | 5555                    |                                                                                                                                                       |
+| MAC address                           | learned                 | Read from the TV on first connect (wired MAC) and saved. Without it, Power On cannot wake a TV that is off the network                                |
+| WoL broadcast address                 | learned                 | The TV subnet's directed broadcast, read from the TV on first connect. If empty, x.y.z.255 of the TV IP is used. Packets also go unicast to the TV IP |
+| WoL port                              | 9                       |                                                                                                                                                       |
+| WoL packets per burst                 | 5                       | The burst repeats every 5 s during the wake window                                                                                                    |
+| Wake wait (s)                         | 120                     | How long Power On keeps sending WoL and retrying ADB. A TV booting after a power cut needed about 50 s                                                |
+| Status poll interval (s)              | 5                       | `dumpsys power` (filtered on the TV). 0 disables polling                                                                                              |
+| Keep ADB connection open              | on                      | See the one-client note above                                                                                                                         |
+| Restore power state after outage      | on                      | Put the TV back in its previous on/off state after a reboot / power cut (see below)                                                                   |
+| Delay after boot before restoring (s) | 15                      |                                                                                                                                                       |
+| HDMI switching method                 | Auto                    | Auto / Key event / Passthrough / Custom, plus per-port ID or command                                                                                  |
+| ADB key name                          | companion-androidtv-adb | Label shown on the TV's approval dialog                                                                                                               |
+| Show / edit ADB private key           | off                     | Advanced: view or paste a PEM key (e.g. reuse an `adbkey` the TV already trusts), or generate a new one                                               |
 
 **Key storage.** The RSA-2048 key is generated on first run and saved in the connection's config (hidden field, written with `saveConfig`). That's what makes the approval stick. It also means a Companion config export contains the key, so treat exports as sensitive.
 
@@ -78,6 +80,15 @@ To update, import the newer `.tgz`, then pick the new version on the connection 
 - **ADB:** `CNXN` with version `0x01000001` and a 1 MiB max payload (the older version with a large payload makes adbd drop the connection). Then `AUTH TOKEN` → `SIGNATURE` (RSA PKCS#1 v1.5 over the SHA-1 DigestInfo prefix plus the token, not re-hashed). If the TV rejects that, `RSAPUBLICKEY` in Android's mincrypt format (`base64(struct) + " name\0"`), and the TV shows the approval prompt. Commands run as `shell:` streams over one connection, serialized, with reconnect on drop.
 - **Power state:** `dumpsys power`, using `mWakefulness=Awake|Dreaming` → on and `Asleep|Dozing` → off (with fallback to `Display Power: state=`). If the TV is unreachable, the state is **offline**.
 - **Power On:** if ADB answers, send `KEYCODE_WAKEUP`. Otherwise, if a MAC is set, send WoL bursts and retry ADB for the wake window, then send `KEYCODE_WAKEUP`. Actions return to Companion at once and run in the background, so Companion never blocks.
+
+## Restore power state after outage
+
+Some TVs come back **on** after a power cut, for example a TCL with the service-menu _Power on mode = Last_, even when they were off before. Others come back in standby when they were on. With **Restore power state after outage** (on by default) the module puts the TV back the way it was:
+
+- While the TV is reachable, the module remembers its last power state (on/off). That includes changes made with the remote, because it comes from polling. It also remembers the kernel **boot id** (`/proc/sys/kernel/random/boot_id`, a new random UUID on every boot). Both are saved in the connection config, so they survive Companion restarts.
+- When the TV is reached again with a **different boot id**, it has rebooted. If it was off and is now on, the module waits the configured delay (default 15 s), sends KEYCODE_SLEEP and checks that the TV is asleep. If it was on and is now in standby, the module wakes it. Every restore is logged and reported in `$(<label>:last_restore)`.
+- A plain network drop, a Companion restart or a module upgrade keeps the same boot id, so **it never triggers a restore**.
+- Pressing any power action (On, Off or Toggle) during the delay cancels the restore. The module never fights the user.
 
 ## After a power cut (mains off/on)
 
