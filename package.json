@@ -1,0 +1,38 @@
+{
+	"name": "androidtv-adb",
+	"version": "0.2.1",
+	"description": "Bitfocus Companion module: control Android / Google TVs over the network with ADB (TCP 5555)",
+	"main": "dist/main.js",
+	"type": "module",
+	"scripts": {
+		"build": "rimraf dist && tsc -p tsconfig.build.json",
+		"dev": "tsc -p tsconfig.build.json --watch",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"lint": "eslint .",
+		"format": "prettier -w .",
+		"test": "rimraf build-test && tsc -p tsconfig.test.json && node --test build-test/test/*.test.js",
+		"package": "npm run build && companion-module-build",
+		"livetest": "tsc -p tsconfig.test.json && node build-test/scripts/livetest.js"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/shiham-dev/companion-module-androidtv-adb.git"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"dependencies": {
+		"@companion-module/base": "~1.12.1"
+	},
+	"devDependencies": {
+		"@companion-module/tools": "^2.9.1",
+		"@types/node": "^22.20.5",
+		"eslint": "^9.39.5",
+		"prettier": "^3.10.1",
+		"rimraf": "^6.1.4",
+		"typescript": "~5.9",
+		"typescript-eslint": "^8.72.2"
+	},
+	"prettier": "@companion-module/tools/.prettierrc.json"
+}
