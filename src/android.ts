@@ -130,7 +130,9 @@ export function parseHdmiInputMap(dumpsys: string): Record<number, string> {
 export const NETWORK_QUERY =
 	'ip -4 addr 2>/dev/null | grep inet; echo @@; getprop ro.boot.mac; echo @@; ' +
 	"dumpsys ethernet 2>/dev/null | grep -o 'iface: [a-z0-9]*, up: [a-z]*, hwAddress: [0-9a-fA-F:]*'; echo @@; " +
-	'for i in eth0 wlan0; do echo "$i $(cat /sys/class/net/$i/address 2>/dev/null)"; done'
+	'for i in eth0 wlan0; do echo "$i $(cat /sys/class/net/$i/address 2>/dev/null)"; done; echo @@; ' +
+	// Wi-Fi: the MAC in use (may be a per-network randomized MAC) and the factory MAC.
+	"dumpsys wifi 2>/dev/null | grep -E 'mWifiInfo|wifi_sta_factory_mac_address' | cut -c1-160"
 
 export interface NetworkInfo {
 	iface: string
@@ -165,7 +167,7 @@ export function directedBroadcast(ip: string, prefix: number): string {
  * Returns null if no usable IPv4 interface was found.
  */
 export function parseNetworkInfo(out: string, preferIp?: string): NetworkInfo | null {
-	const [addrs = '', bootMac = '', eth = '', sys = ''] = out.split('@@')
+	const [addrs = '', bootMac = '', eth = '', sys = '', wifi = ''] = out.split('@@')
 	const ifaces: { iface: string; ip: string; prefix: number; brd: string }[] = []
 	for (const line of addrs.split(/\r?\n/)) {
 		const m = /inet (\d+\.\d+\.\d+\.\d+)\/(\d+)(?: brd (\d+\.\d+\.\d+\.\d+))?.*?\s(\S+)\s*$/.exec(line.trim())
@@ -188,6 +190,13 @@ export function parseNetworkInfo(out: string, preferIp?: string): NetworkInfo | 
 	let mac = macs.get(chosen.iface) ?? ''
 	// ro.boot.mac is the built-in Ethernet MAC on the TVs we know; only trust it for a wired interface.
 	if (!mac && /^eth/.test(chosen.iface)) mac = normMac(bootMac)
+	if (!mac && /^wlan/.test(chosen.iface)) {
+		// Prefer the MAC the Wi-Fi link actually uses (Android may randomize it per network),
+		// then the factory MAC. 02:00:00:00:00:00 is Android's "hidden" placeholder.
+		const inUse = normMac(/mWifiInfo[^\n]*?MAC: ([0-9a-fA-F:]{17})/.exec(wifi)?.[1])
+		const factory = normMac(/wifi_sta_factory_mac_address=([0-9a-fA-F:]{17})/.exec(wifi)?.[1])
+		mac = inUse && inUse !== '02:00:00:00:00:00' ? inUse : factory
+	}
 
 	return {
 		iface: chosen.iface,

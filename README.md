@@ -32,7 +32,7 @@ HDMI selection is vendor-specific, so there are four methods. Set one per connec
 1. Download `androidtv-adb-<version>.tgz` from the [Releases](https://github.com/shiham-dev/companion-module-androidtv-adb/releases) page (or build it, see below).
 2. In the Companion web UI (default `http://127.0.0.1:8000`), go to **Modules → Import module package** and pick the `.tgz`.
 3. Go to **Connections**, search for **"Android TV / Google TV (ADB)"** (listed under "Generic") and click **Add**.
-4. Enter the TV IP and click **Save**. The MAC address and the WoL broadcast address fill in **automatically** the first time the module reaches the TV. The MAC comes from the TV's wired interface and the broadcast from its subnet. You can also type them in.
+4. Enter the TV IP and click **Save**. The MAC address and the WoL broadcast address fill in **automatically** the first time the module reaches the TV. The MAC comes from the interface the TV uses (wired, or the Wi-Fi MAC in use) and the broadcast from its subnet. You can also type them in.
 5. On the TV, accept **"Allow USB debugging?"**: tick _Always allow from this computer_, then press _Allow_. Until you do, the connection shows _Awaiting approval on TV_. The fingerprint shown on the TV matches the one in the connection settings and in `$(<label>:adb_key_fingerprint)`.
 6. Drag the presets from **Buttons → Presets → \<connection\>** onto your Stream Deck pages.
 

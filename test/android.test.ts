@@ -111,3 +111,22 @@ test('directedBroadcast', () => {
 	assert.equal(directedBroadcast('192.168.1.10', 25), '192.168.1.127')
 	assert.equal(directedBroadcast('bad', 24), '')
 })
+
+test('parseNetworkInfo: Wi-Fi MAC from dumpsys wifi (in-use MAC preferred, factory MAC fallback)', () => {
+	const wifiLine =
+		'mWifiInfo SSID: "Venue", BSSID: aa:bb:cc:dd:ee:ff, MAC: 92:6a:63:77:71:0a, Security type: 2, Supplicant state: COMPLETED\nwifi_sta_factory_mac_address=94:8c:d7:b0:7a:74\n'
+	const base = '    inet 172.30.50.60/24 brd 172.30.50.255 scope global wlan0\n@@\n\n@@\n@@\neth0 \nwlan0 \n@@\n'
+	const info = parseNetworkInfo(base + wifiLine, '172.30.50.60')
+	assert.equal(info?.iface, 'wlan0')
+	assert.equal(info?.broadcast, '172.30.50.255')
+	assert.equal(info?.mac, '92:6a:63:77:71:0a') // randomized MAC actually in use
+	const hidden = wifiLine.replace('MAC: 92:6a:63:77:71:0a', 'MAC: 02:00:00:00:00:00')
+	assert.equal(parseNetworkInfo(base + hidden, '172.30.50.60')?.mac, '94:8c:d7:b0:7a:74')
+	// Real line from a disconnected TCL (Android 12)
+	const real =
+		'mWifiInfo SSID: <unknown ssid>, BSSID: <none>, MAC: 94:8c:d7:b0:7a:74, Security type: -1, Supplicant state: DISCONNECTED\n'
+	assert.equal(parseNetworkInfo(base + real, '172.30.50.60')?.mac, '94:8c:d7:b0:7a:74')
+	// Wired TVs still never use the Wi-Fi MAC
+	const wired = '    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\n@@\n38:26:56:42:8b:ab\n@@\n@@\n@@\n' + wifiLine
+	assert.equal(parseNetworkInfo(wired, '10.0.0.5')?.mac, '38:26:56:42:8b:ab')
+})
