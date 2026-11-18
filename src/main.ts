@@ -125,6 +125,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			wakeWindowMs: cfg.wake_window * 1000,
 			pollIntervalMs: Math.max(0, cfg.poll_interval) === 0 ? 0 : Math.max(1, cfg.poll_interval) * 1000,
 			keepConnected: cfg.keep_connected,
+			powerOffMethod: cfg.power_off_method,
 			restoreEnabled: cfg.restore_after_outage,
 			restoreDelayMs: Math.max(0, cfg.restore_delay) * 1000,
 			knownBootId: cfg.last_boot_id,

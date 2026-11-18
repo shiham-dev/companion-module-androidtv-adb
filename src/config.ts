@@ -21,6 +21,8 @@ export interface ModuleConfig {
 	regenerate_key: boolean
 	/** PEM private key, generated on first run and persisted with saveConfig. */
 	adb_private_key: string
+	/** 'sleep' (KEYCODE_SLEEP/WAKEUP) or 'power' (KEYCODE_POWER, state-checked). */
+	power_off_method: 'sleep' | 'power'
 	/** Restore the last known power state when the TV rebooted (power cut). */
 	restore_after_outage: boolean
 	/** Seconds to wait after detecting the reboot before restoring. */
@@ -57,6 +59,7 @@ export function withDefaults(c: Partial<ModuleConfig> | undefined): ModuleConfig
 		show_key: c?.show_key ?? false,
 		regenerate_key: c?.regenerate_key ?? false,
 		adb_private_key: c?.adb_private_key ?? '',
+		power_off_method: c?.power_off_method === 'power' ? 'power' : 'sleep',
 		restore_after_outage: c?.restore_after_outage ?? true,
 		restore_delay: n(c?.restore_delay, 15),
 		last_power_state: c?.last_power_state ?? '',
@@ -187,6 +190,19 @@ export function getConfigFields(publicKeyInfo: string): SomeCompanionConfigField
 			default: '',
 			isVisibleExpression: `$(options:hdmi_method) != 'keycode'`,
 		})),
+		{
+			type: 'dropdown',
+			id: 'power_off_method',
+			label: 'Power Off method',
+			tooltip:
+				'Sleep key (default): KEYCODE_SLEEP / KEYCODE_WAKEUP. Power key: KEYCODE_POWER, sent only after checking the TV state. Use "Power key" for TVs whose network-keeping standby only applies to the power button, e.g. TCL with Settings > System > Power and energy > Standby Mode = Screenless: the TV then stays on the network while off, so Power On always works.',
+			width: 4,
+			default: 'sleep',
+			choices: [
+				{ id: 'sleep', label: 'Sleep key (default)' },
+				{ id: 'power', label: 'Power key (keeps Screenless / network standby)' },
+			],
+		},
 		{
 			type: 'checkbox',
 			id: 'restore_after_outage',

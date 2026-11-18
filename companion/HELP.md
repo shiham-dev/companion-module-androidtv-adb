@@ -32,6 +32,10 @@ Controls one Android / Google TV of any brand over the network with ADB (TCP por
 
 After mains power returns, many TVs sit in a cold standby with Android not running and are invisible on the network. Only Wake-on-LAN can wake them. That needs the MAC (learned automatically once the TV has been reached), the TV's _Network standby / Wake on LAN_ setting switched on, and a network that passes the magic packet. Some models ignore WoL from cold standby; the remote is then the only way.
 
+### TVs on Wi-Fi
+
+Many TVs switch Wi-Fi off in standby and ignore Wake-on-LAN. On TCL Android 12 TVs, set _Settings → System → Power and energy → Standby Mode_ to **Screenless** and set **Power Off method** to **Power key**: the TV then only turns its screen off and stays reachable, so Power On always works (at the cost of higher standby power). Also switch off TCL's inactivity auto-standby under _Energy saver_, and give the TV a DHCP reservation.
+
 ### Restore power state after outage
 
 On by default. If the TV reboots, for example after a power cut, and comes up in a different state than before, the module waits the configured delay (default 15 s) and switches it off again, or wakes it. Only a real reboot triggers this (the TV's kernel boot id changes); network drops and Companion restarts never do. Any power button pressed during the delay cancels the restore. See `last_restore`.

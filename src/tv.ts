@@ -50,6 +50,14 @@ export interface TvOptions {
 	knownBootId?: string
 	/** Power state persisted from the last time the TV was reachable. */
 	lastKnownPower?: '' | 'on' | 'off'
+	/**
+	 * How Power Off / Power On are sent:
+	 * - 'sleep' (default): KEYCODE_SLEEP / KEYCODE_WAKEUP.
+	 * - 'power': KEYCODE_POWER, sent only after checking the current state (it is a toggle).
+	 *   Needed for TVs whose network-keeping standby (e.g. TCL "Standby Mode: Screenless")
+	 *   only applies to the power button; KEYCODE_SLEEP puts them into deep sleep, off the network.
+	 */
+	powerOffMethod?: 'sleep' | 'power'
 }
 
 export type ConnectionStatus =
@@ -383,8 +391,78 @@ export class TvController extends EventEmitter<TvEvents> {
 		return this.#restore !== null
 	}
 
+	/** Read the power state now (throws if unreachable). */
+	async #queryPower(): Promise<PowerState> {
+		return parsePowerState(await this.client.shell(POWER_QUERY, 8000))
+	}
+
+	/** Wait until the TV reports `want` (or drops off the network when want is "off"). */
+	async #waitForPower(want: 'on' | 'off', ms: number): Promise<PowerState> {
+		let state: PowerState = 'unknown'
+		const until = Date.now() + ms
+		while (Date.now() < until) {
+			await sleep(1500)
+			try {
+				state = await this.#queryPower()
+			} catch (e) {
+				if (want === 'off' && isUnreachable(e)) return 'offline'
+				if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+				continue
+			}
+			if (state === want) return state
+		}
+		return state
+	}
+
+	/**
+	 * "Power key" method: switch off with KEYCODE_POWER, sent only if the TV is confirmed awake
+	 * (KEYCODE_POWER toggles, so it must never be sent to a TV that is already off).
+	 */
+	async #powerKeyOff(): Promise<void> {
+		const before = await this.#queryPower()
+		if (before === 'off') {
+			this.#update({ power: 'off' })
+			this.emit('log', 'info', 'Power Off: TV already off (power-key method), nothing sent')
+			return
+		}
+		try {
+			await this.key(KEYCODE.POWER)
+		} catch (e) {
+			if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+		}
+		const state = await this.#waitForPower('off', 8000)
+		if (state !== 'off' && state !== 'offline') {
+			this.refreshSoon(1000)
+			throw new Error('TV accepted KEYCODE_POWER but still reports power state "' + state + '"')
+		}
+		this.#update({ power: state })
+		this.refreshSoon(2000)
+	}
+
+	/** "Power key" method: switch on with KEYCODE_POWER, sent only if the TV is confirmed asleep. */
+	async #powerKeyOn(): Promise<void> {
+		let state = await this.#queryPower()
+		for (let attempt = 1; attempt <= 2 && state !== 'on'; attempt++) {
+			if (state === 'off') {
+				try {
+					await this.key(KEYCODE.POWER)
+				} catch (e) {
+					if (!(e instanceof AdbError && e.code === 'COMMAND_TIMEOUT')) throw e
+				}
+			}
+			state = await this.#waitForPower('on', 8000)
+		}
+		if (state !== 'on') {
+			this.refreshSoon(1000)
+			throw new Error('TV did not wake with KEYCODE_POWER; it reports power state "' + state + '"')
+		}
+		this.#update({ power: 'on', connection: 'connected', lastError: '' })
+		this.refreshSoon(2000)
+	}
+
 	/** Send KEYCODE_SLEEP until dumpsys power reports the TV asleep (2 attempts). */
 	async #sleepAndVerify(): Promise<void> {
+		if (this.opts.powerOffMethod === 'power') return this.#powerKeyOff()
 		let state: PowerState = 'unknown'
 		for (let attempt = 1; attempt <= 2; attempt++) {
 			try {
@@ -419,6 +497,10 @@ export class TvController extends EventEmitter<TvEvents> {
 	async powerOff(): Promise<void> {
 		this.#cancelRestore('Power Off pressed')
 		try {
+			if (this.opts.powerOffMethod === 'power') {
+				await this.#powerKeyOff()
+				return
+			}
 			await this.key(KEYCODE.SLEEP)
 		} catch (e) {
 			if (!isUnreachable(e)) throw e
@@ -494,6 +576,7 @@ export class TvController extends EventEmitter<TvEvents> {
 
 	/** Send KEYCODE_WAKEUP until dumpsys power reports the TV awake (3 attempts). */
 	async #wakeAndVerify(): Promise<void> {
+		if (this.opts.powerOffMethod === 'power') return this.#powerKeyOn()
 		let state: PowerState = 'unknown'
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			try {
